@@ -1,0 +1,89 @@
+name: Signed release and OTA
+on:
+  push:
+    tags:
+      - 'v[0-9]*.[0-9]*.[0-9]*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version without v, e.g. 1.0.0'
+        required: true
+        type: string
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK
+        run: sdkmanager 'platforms;android-36' 'build-tools;35.0.0'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+      - name: Validate semantic version and compute monotonically increasing code
+        shell: bash
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = 'workflow_dispatch' ]; then
+            VERSION="$REQUESTED_VERSION"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Use tag vMAJOR.MINOR.PATCH'; exit 1; }
+          IFS=. read -r major minor patch <<< "$VERSION"
+          major=$((10#$major)); minor=$((10#$minor)); patch=$((10#$patch))
+          if (( major > 2000 || minor > 999 || patch > 999 )); then echo 'Version exceeds scheme limits'; exit 1; fi
+          VERSION_CODE=$((major * 1000000 + minor * 1000 + patch))
+          echo "RELEASE_TAG=v$VERSION" >> "$GITHUB_ENV"
+          echo "RELEASE_VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "RELEASE_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
+      - name: Require release signing secrets
+        env:
+          KEYSTORE_B64: ${{ secrets.NOTEV_ID_KEYSTORE_B64 }}
+          STORE_PASS: ${{ secrets.NOTEV_ID_STORE_PASSWORD }}
+          KEY_PASS: ${{ secrets.NOTEV_ID_KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.NOTEV_ID_KEY_ALIAS }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ] || [ -z "$STORE_PASS" ] || [ -z "$KEY_PASS" ] || [ -z "$KEY_ALIAS" ]; then
+            echo 'Signing secrets missing. Read README.md: One-time signing setup.' >&2
+            exit 1
+          fi
+      - name: Restore keystore securely on ephemeral runner
+        env:
+          KEYSTORE_B64: ${{ secrets.NOTEV_ID_KEYSTORE_B64 }}
+        run: |
+          umask 077
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/notevid-release.jks"
+      - name: Build signed release APK
+        env:
+          NOTEV_ID_KEYSTORE_FILE: ${{ runner.temp }}/notevid-release.jks
+          NOTEV_ID_STORE_PASSWORD: ${{ secrets.NOTEV_ID_STORE_PASSWORD }}
+          NOTEV_ID_KEY_PASSWORD: ${{ secrets.NOTEV_ID_KEY_PASSWORD }}
+          NOTEV_ID_KEY_ALIAS: ${{ secrets.NOTEV_ID_KEY_ALIAS }}
+        run: |
+          gradle --no-daemon :app:testDebugUnitTest :app:assembleRelease \
+            -PnotevidVersionName="$RELEASE_VERSION" \
+            -PnotevidVersionCode="$RELEASE_CODE" \
+            -PgithubRepo="$GITHUB_REPOSITORY" --stacktrace
+      - name: Prepare APK and SHA-256 manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          cp app/build/outputs/apk/release/app-release.apk "release-assets/NoteVid-${RELEASE_TAG}.apk"
+          cd release-assets
+          sha256sum "NoteVid-${RELEASE_TAG}.apk" > SHA256SUMS.txt
+      - name: Publish GitHub Release for in-app OTA
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$RELEASE_TAG" release-assets/* \
+            --target "$GITHUB_SHA" --title "NoteVid $RELEASE_VERSION" --generate-notes
