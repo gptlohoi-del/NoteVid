@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release version without v, e.g. 1.0.0'
+        description: 'Release version without v, e.g. 1.0.1'
         required: true
         type: string
 permissions:
@@ -81,9 +81,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release-assets
-          cp app/build/outputs/apk/release/app-release.apk "release-assets/NoteVid-${RELEASE_TAG}.apk"
+          cp app/build/outputs/apk/release/app-release.apk "release-assets/NoteVid-${RELEASE_VERSION}.apk"
           cd release-assets
-          sha256sum "NoteVid-${RELEASE_TAG}.apk" > SHA256SUMS.txt
+          sha256sum "NoteVid-${RELEASE_VERSION}.apk" > SHA256SUMS.txt
       - name: Publish GitHub Release for in-app OTA
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

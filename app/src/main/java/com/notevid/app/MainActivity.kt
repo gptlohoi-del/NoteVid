@@ -14,6 +14,7 @@ import android.view.WindowManager
 import android.widget.*
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
 import androidx.media3.exoplayer.ExoPlayer
@@ -24,6 +25,7 @@ import java.util.Locale
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class MainActivity : Activity() {
     private val folderRequest = 7001
+    private val videoRequest = 7002
     private val prefs by lazy { getSharedPreferences("notevid", 0) }
     private lateinit var store: NoteStore
     private lateinit var updates: UpdateManager
@@ -77,6 +79,15 @@ class MainActivity : Activity() {
         createUi()
         playerView.player = player
         player.addListener(object : Player.Listener {
+            override fun onPlayerError(error: PlaybackException) {
+                val name = currentVideo?.name ?: "video"
+                showError(
+                    "Không phát được $name.\n\n" +
+                    "Mã lỗi Media3: ${error.errorCodeName}\n" +
+                    "Chi tiết: ${error.cause?.message ?: error.message}\n\n" +
+                    "Hãy thử video MP4 mã hóa H.264/AAC. Nếu vẫn lỗi, gửi ảnh thông báo này để mình kiểm tra."
+                )
+            }
             override fun onVideoSizeChanged(videoSize: VideoSize) {
                 val w = videoSize.width * videoSize.pixelWidthHeightRatio
                 val h = videoSize.height.toFloat()
@@ -99,7 +110,16 @@ class MainActivity : Activity() {
             try {
                 val last = prefs.getString("lastVideo", null)
                 val video = store.videosIn(folderUri!!).firstOrNull { it.name == last }
-                if (video != null) openVideo(video) else showVideos()
+                if (video != null) openVideo(video)
+                else {
+                    val found = store.videosIn(folderUri!!)
+                    if (found.size == 1) openVideo(found.first())
+                    else {
+                        val lastUri = prefs.getString("lastPickedVideoUri", null)?.let(Uri::parse)
+                        val fromPicker = lastUri?.let { store.videoFromPickedFile(folderUri!!, it) }
+                        if (fromPicker != null) openVideo(fromPicker) else showVideos()
+                    }
+                }
             } catch (e: Exception) { showError("Quyền truy cập thư mục đã hết hiệu lực. Hãy chọn lại. ${e.message}") }
         }
         updates.maybeAutoCheck()
@@ -120,7 +140,8 @@ class MainActivity : Activity() {
         setContentView(root)
         val top = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         top.addView(button("Thư mục") { selectFolder() })
-        top.addView(button("Chọn video") { showVideos() })
+        top.addView(button("Mở video") { pickVideo() })
+        top.addView(button("Danh sách") { showVideos() })
         top.addView(button("Cài đặt") { showSettings() })
         top.addView(button("Cập nhật") { updates.check() })
         topScroll = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(top) }
@@ -182,35 +203,98 @@ class MainActivity : Activity() {
         startActivityForResult(intent, folderRequest)
     }
 
-    @Deprecated("Legacy result API is sufficient for a single folder picker")
+    /** Direct SAF picker to handle vendor gallery folders not listing MIME types consistently. */
+    private fun pickVideo() {
+        if (folderUri == null) {
+            AlertDialog.Builder(this).setTitle("Chọn thư mục trước")
+                .setMessage("Để lưu .notevid.json cùng thư mục với video, NoteVid cần quyền đọc/ghi thư mục video trước.")
+                .setPositiveButton("Chọn thư mục") { _, _ -> selectFolder() }
+                .setNegativeButton("Đóng", null).show()
+            return
+        }
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*" // Supports videos incorrectly reported as application/octet-stream.
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+        }
+        startActivityForResult(intent, videoRequest)
+    }
+
+    @Deprecated("Legacy result API is sufficient for the two SAF pickers")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode != folderRequest || resultCode != RESULT_OK) return
+        if (resultCode != RESULT_OK) return
         val uri = data?.data ?: return
-        try {
-            val flags = data.flags and (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
-            contentResolver.takePersistableUriPermission(uri, flags)
-            folderUri = uri
-            prefs.edit().putString("folderUri", uri.toString()).remove("lastVideo").apply()
-            closeVideo()
-            showVideos()
-        } catch (e: Exception) { showError("Không lưu được quyền đọc/ghi thư mục: ${e.message}") }
+        when (requestCode) {
+            folderRequest -> {
+                try {
+                    val flags = data.flags and (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                    contentResolver.takePersistableUriPermission(uri, flags)
+                    folderUri = uri
+                    prefs.edit().putString("folderUri", uri.toString())
+                        .remove("lastVideo").remove("lastPickedVideoUri").apply()
+                    closeVideo()
+                    val videos = store.videosIn(uri)
+                    when (videos.size) {
+                        1 -> {
+                            toast("Đã tìm thấy ${videos.first().name}; đang mở video")
+                            openVideo(videos.first())
+                        }
+                        else -> showVideos()
+                    }
+                } catch (e: Exception) {
+                    showError("Không đọc được thư mục vừa chọn: ${e.message}. Hãy chọn thư mục con như Movies/HocSao.")
+                }
+            }
+            videoRequest -> {
+                try {
+                    val flags = data.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    if (flags != 0) {
+                        try { contentResolver.takePersistableUriPermission(uri, flags) }
+                        catch (_: SecurityException) { /* Tree permission may already cover the file. */ }
+                    }
+                    val rootUri = folderUri ?: run { selectFolder(); return }
+                    val video = store.videoFromPickedFile(rootUri, uri)
+                    if (video != null) {
+                        openVideo(video)
+                    } else {
+                        AlertDialog.Builder(this)
+                            .setTitle("Video không nằm trong thư mục đã cấp quyền")
+                            .setMessage("NoteVid phải lưu ghi chú cạnh video. Hãy chọn đúng thư mục CHỨA video này, sau đó bấm Mở video. Trong trình chọn tệp, vào Bộ nhớ trong → thư mục video; đừng chọn từ Gần đây/Ảnh nếu chúng dùng nhà cung cấp khác. Video chưa được mở để tránh lưu ghi chú sai chỗ.")
+                            .setPositiveButton("Chọn lại thư mục") { _, _ -> selectFolder() }
+                            .setNegativeButton("Đóng", null).show()
+                    }
+                } catch (e: Exception) {
+                    showError("Không mở được tệp đã chọn: ${e.message}")
+                }
+            }
+        }
     }
 
     private fun showVideos() {
         val uri = folderUri ?: run { selectFolder(); return }
         try {
             val files = store.videosIn(uri)
-            if (files.isEmpty()) {
-                AlertDialog.Builder(this).setTitle("Không có video")
-                    .setMessage("Thư mục chưa có MP4/MKV/WebM/MOV. Chọn đúng thư mục CHỨA video, không chọn thư mục cha.")
-                    .setPositiveButton("Đổi thư mục") { _, _ -> selectFolder() }.setNegativeButton("Đóng", null).show()
-            } else {
-                AlertDialog.Builder(this).setTitle("Chọn video (${files.size})")
+            when (files.size) {
+                0 -> {
+                    val entries = store.allNamesIn(uri).take(10)
+                    val examples = if (entries.isEmpty()) "Android không trả về tệp nào trong thư mục này."
+                        else "Các mục Android trả về: ${entries.joinToString(", ")}"
+                    AlertDialog.Builder(this).setTitle("Chưa tìm thấy video")
+                        .setMessage("$examples\n\nNếu thư mục thật sự có video, bấm Mở video để chọn trực tiếp tệp đó; hoặc đổi thư mục chứa video. Hỗ trợ MP4, MKV, AVI, MOV, WebM và các tên video thông dụng.")
+                        .setPositiveButton("Mở video") { _, _ -> pickVideo() }
+                        .setNeutralButton("Đổi thư mục") { _, _ -> selectFolder() }
+                        .setNegativeButton("Đóng", null).show()
+                }
+                1 -> openVideo(files.first())
+                else -> AlertDialog.Builder(this).setTitle("Chọn video (${files.size})")
                     .setItems(files.map { it.name }.toTypedArray()) { _, which -> openVideo(files[which]) }
+                    .setNeutralButton("Mở video trực tiếp") { _, _ -> pickVideo() }
                     .setNegativeButton("Đóng", null).show()
             }
-        } catch (e: Exception) { showError("Không mở được thư mục: ${e.message}") }
+        } catch (e: Exception) {
+            showError("Không liệt kê được thư mục video: ${e.message}. Hãy cấp lại quyền thư mục hoặc thử nút Mở video.")
+        }
     }
 
     private fun openVideo(video: NoteStore.VideoFile) {
@@ -228,9 +312,19 @@ class MainActivity : Activity() {
         editing = false
         btnEdit.text = "✎ Chỉnh sửa"
         title.text = video.name + "   ·   ${notes.size} ghi chú"
-        prefs.edit().putString("lastVideo", video.name).apply()
-        player.setMediaItem(MediaItem.fromUri(video.uri))
-        player.prepare()
+        prefs.edit().putString("lastVideo", video.name)
+            .putString("lastPickedVideoUri", video.uri.toString()).apply()
+        try {
+            contentResolver.openFileDescriptor(video.uri, "r")?.use { /* Test readability before playback. */ }
+                ?: throw java.io.IOException("Android không trả về tệp video")
+            player.setMediaItem(MediaItem.fromUri(video.uri))
+            player.prepare()
+            player.play()
+        } catch (e: Exception) {
+            showError("Không mở được ${video.name}: ${e.message}. Hãy chọn video ở bộ nhớ máy, không phải tệp cloud chưa tải về.")
+            closeVideo()
+            return
+        }
         val rememberPos = prefs.getLong("position_${video.uri.hashCode()}", 0L)
         if (rememberPos > 0) player.seekTo(rememberPos)
     }

@@ -5,8 +5,8 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-val releaseVersion = (findProperty("notevidVersionName") as String?) ?: "1.0.0"
-val releaseCode = (findProperty("notevidVersionCode") as String?)?.toIntOrNull() ?: 1_000_000
+val releaseVersion = (findProperty("notevidVersionName") as String?) ?: "1.0.1"
+val releaseCode = (findProperty("notevidVersionCode") as String?)?.toIntOrNull() ?: 1_000_001
 val githubRepo = (findProperty("githubRepo") as String?) ?: "OWNER/NoteVid"
 val keystoreFile = System.getenv("NOTEV_ID_KEYSTORE_FILE")
 val envKeyAlias = System.getenv("NOTEV_ID_KEY_ALIAS")
