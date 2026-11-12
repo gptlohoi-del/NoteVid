@@ -153,3 +153,14 @@ Nếu còn lỗi khác, hãy xem log của bước Gradle (nếu đã đến bư
 - Tính năng chưa được biên dịch và chạy trực tiếp trên điện thoại trong môi trường tạo gói này; cần CI GitHub xác nhận và kiểm thử thực tế.
 
 **Lưu ý khi mở trực tiếp tệp:** Trong trình chọn tệp Android, hãy vào *Bộ nhớ trong → Movies → HocSao*; tránh chọn từ mục **Gần đây/Ảnh** vì chúng có thể trả về URI của ứng dụng thư viện ảnh thay vì URI của thư mục đã cấp quyền.
+
+## NoteVid 1.0.2 – Xoay ngang, toàn màn hình và ẩn menu
+
+Khi đã mở video, trong hàng nút bên dưới trình phát:
+
+- **⛶ Ngang**: xoay màn hình sang ngang và tự động chuyển sang chế độ xem toàn màn hình; video và ghi chú nổi vẫn hiển thị. Ứng dụng yêu cầu xoay ngang kể cả khi hệ thống đang khóa tự động xoay.
+- **Ẩn menu**: ẩn mọi thanh công cụ, thanh tiến trình, tiêu đề, chỉ dẫn và thanh trạng thái/điều hướng Android. Chỉ còn vùng video với ghi chú nổi tại đúng thời điểm. Dùng được cả khi đang dọc hoặc ngang.
+- **Chạm một lần lên video** để hiện lại các menu. Khi đang ngang, bấm **↕ Dọc** để trở về màn hình dọc.
+- Khi đang chỉnh sửa ghi chú, vào chế độ xem tập trung sẽ tự tắt chỉnh sửa, tránh vô tình thay đổi ghi chú. Video giữ nguyên tỷ lệ khung hình (`fit`) để không cắt nội dung hoặc làm lệch vị trí các ghi chú.
+
+Kiểm thử thủ công: phát video có ghi chú → bấm **⛶ Ngang** → kiểm tra ghi chú nằm đúng vị trí và không còn các menu → chạm video để hiện lại menu → bấm **↕ Dọc** → bấm **Ẩn menu** ở màn hình dọc → chạm video để trở về. Xác nhận cả video dọc, video ngang và thiết bị dùng nút hoặc cử chỉ điều hướng.

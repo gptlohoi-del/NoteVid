@@ -3,14 +3,20 @@ package com.notevid.app
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.LayoutInflater
+import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsets
 import android.view.WindowManager
+import android.window.OnBackInvokedCallback
+import android.window.OnBackInvokedDispatcher
 import android.widget.*
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
@@ -32,19 +38,26 @@ class MainActivity : Activity() {
     private lateinit var player: ExoPlayer
     private lateinit var playerView: PlayerView
     private lateinit var overlay: NoteOverlayView
+    private lateinit var focusTapTarget: View
     private lateinit var title: TextView
     private lateinit var topScroll: HorizontalScrollView
     private lateinit var instructions: TextView
     private lateinit var clock: TextView
     private lateinit var seek: SeekBar
+    private lateinit var progressRow: LinearLayout
+    private lateinit var playbackRow: LinearLayout
+    private lateinit var notesRow: LinearLayout
     private lateinit var btnPlay: Button
     private lateinit var btnEdit: Button
     private lateinit var btnSpeed: Button
     private lateinit var btnLoop: Button
+    private lateinit var btnOrientation: Button
     private var folderUri: Uri? = null
     private var currentVideo: NoteStore.VideoFile? = null
     private val notes = mutableListOf<VideoNote>()
     private var editing = false
+    private var menusHidden = false
+    private var focusBackCallback: OnBackInvokedCallback? = null
     private var isSeeking = false
     private val speeds = listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f)
     private var speedIndex = 2
@@ -151,8 +164,11 @@ class MainActivity : Activity() {
         val scene = LayoutInflater.from(this).inflate(R.layout.player_scene, root, false)
         playerView = scene.findViewById(R.id.video_player)
         overlay = scene.findViewById(R.id.note_overlay)
+        focusTapTarget = scene.findViewById<View>(R.id.focus_tap_target).apply {
+            setOnClickListener { setMenusHidden(false) }
+        }
         root.addView(scene, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
-        val progressRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(dp(6), dp(1), dp(6), dp(1)) }
+        progressRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(dp(6), dp(1), dp(6), dp(1)) }
         seek = SeekBar(this).apply {
             max = 1000
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
@@ -173,21 +189,24 @@ class MainActivity : Activity() {
         clock = TextView(this).apply { text = "00:00:00.00"; textSize = 11f; setPadding(dp(3), dp(12), dp(3), 0) }
         progressRow.addView(clock)
         root.addView(progressRow)
-        val line1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        playbackRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         btnPlay = button("▶ Phát") { if (player.isPlaying) player.pause() else player.play() }
-        line1.addView(btnPlay, LinearLayout.LayoutParams(0, dp(48), 1f))
-        line1.addView(button("−5s") { player.seekTo((player.currentPosition - 5000L).coerceAtLeast(0)) }, LinearLayout.LayoutParams(0, dp(48), 1f))
-        line1.addView(button("+5s") { player.seekTo(player.currentPosition + 5000L) }, LinearLayout.LayoutParams(0, dp(48), 1f))
+        playbackRow.addView(btnPlay, LinearLayout.LayoutParams(0, dp(48), 1f))
+        playbackRow.addView(button("−5s") { player.seekTo((player.currentPosition - 5000L).coerceAtLeast(0)) }, LinearLayout.LayoutParams(0, dp(48), 1f))
+        playbackRow.addView(button("+5s") { player.seekTo(player.currentPosition + 5000L) }, LinearLayout.LayoutParams(0, dp(48), 1f))
         btnSpeed = button("1×") { speedIndex = (speedIndex + 1) % speeds.size; player.setPlaybackSpeed(speeds[speedIndex]); btnSpeed.text = "${speeds[speedIndex]}×" }
-        line1.addView(btnSpeed, LinearLayout.LayoutParams(0, dp(48), 1f))
+        playbackRow.addView(btnSpeed, LinearLayout.LayoutParams(0, dp(48), 1f))
         btnLoop = button("Lặp A–B") { toggleLoop() }
-        line1.addView(btnLoop, LinearLayout.LayoutParams(0, dp(48), 1f))
-        root.addView(line1)
-        val line2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        playbackRow.addView(btnLoop, LinearLayout.LayoutParams(0, dp(48), 1f))
+        root.addView(playbackRow)
+        notesRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         btnEdit = button("✎ Chỉnh sửa") { setEditing(!editing) }
-        line2.addView(btnEdit, LinearLayout.LayoutParams(0, dp(50), 1f))
-        line2.addView(button("☷ Danh sách ghi chú") { showNoteList() }, LinearLayout.LayoutParams(0, dp(50), 1f))
-        root.addView(line2)
+        notesRow.addView(btnEdit, LinearLayout.LayoutParams(0, dp(50), 1f))
+        notesRow.addView(button("☷ Ghi chú") { showNoteList() }, LinearLayout.LayoutParams(0, dp(50), 1f))
+        btnOrientation = button("⛶ Ngang") { toggleOrientation() }
+        notesRow.addView(btnOrientation, LinearLayout.LayoutParams(0, dp(50), 1f))
+        notesRow.addView(button("Ẩn menu") { setMenusHidden(true) }, LinearLayout.LayoutParams(0, dp(50), 1f))
+        root.addView(notesRow)
         instructions = TextView(this).apply {
             text = "Xem: ghi chú tự hiện. Chỉnh sửa: dừng video, kéo để vẽ khung; chạm khung để mở 5 công cụ."
             textSize = 11f; setPadding(dp(12), dp(2), dp(12), dp(7))
@@ -533,21 +552,101 @@ class MainActivity : Activity() {
         }
     }
 
+    /** Rotate into landscape focus mode, or return to portrait with controls visible. */
+    private fun toggleOrientation() {
+        if (currentVideo == null) { toast("Hãy mở video trước"); return }
+        val landscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+        if (landscape) {
+            setMenusHidden(false)
+            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        } else {
+            // Lock only to a landscape orientation; the screen can still flip by 180°.
+            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            setMenusHidden(true)
+        }
+    }
+
+    /** In focus mode no app or system controls cover the video or its timed notes.
+     *  A tap anywhere on the video (or the Back button) restores the controls.
+     */
+    private fun setMenusHidden(hidden: Boolean) {
+        if (hidden && currentVideo == null) { toast("Hãy mở video trước"); return }
+        if (hidden && editing) setEditing(false)
+        menusHidden = hidden
+        focusTapTarget.visibility = if (hidden) View.VISIBLE else View.GONE
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            // Android 13+ uses predictive Back instead of the legacy callback.
+            if (hidden && focusBackCallback == null) {
+                val callback = OnBackInvokedCallback { setMenusHidden(false) }
+                onBackInvokedDispatcher.registerOnBackInvokedCallback(
+                    OnBackInvokedDispatcher.PRIORITY_DEFAULT, callback
+                )
+                focusBackCallback = callback
+            } else if (!hidden) {
+                focusBackCallback?.let(onBackInvokedDispatcher::unregisterOnBackInvokedCallback)
+                focusBackCallback = null
+            }
+        }
+        updateOrientationUi()
+        updateSystemBars()
+    }
+
     private fun updateOrientationUi() {
-        val compact = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
-        topScroll.visibility = if (compact) android.view.View.GONE else android.view.View.VISIBLE
-        title.visibility = if (compact) android.view.View.GONE else android.view.View.VISIBLE
-        instructions.visibility = if (compact) android.view.View.GONE else android.view.View.VISIBLE
+        val landscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+        topScroll.visibility = if (menusHidden || landscape) View.GONE else View.VISIBLE
+        title.visibility = if (menusHidden || landscape) View.GONE else View.VISIBLE
+        instructions.visibility = if (menusHidden || landscape) View.GONE else View.VISIBLE
+        progressRow.visibility = if (menusHidden) View.GONE else View.VISIBLE
+        playbackRow.visibility = if (menusHidden) View.GONE else View.VISIBLE
+        notesRow.visibility = if (menusHidden) View.GONE else View.VISIBLE
+        btnOrientation.text = if (landscape) "↕ Dọc" else "⛶ Ngang"
+    }
+
+    private fun updateSystemBars() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.insetsController?.apply {
+                val bars = WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars()
+                if (menusHidden) {
+                    systemBarsBehavior = android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                    hide(bars)
+                } else {
+                    show(bars)
+                }
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = if (menusHidden) {
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or View.SYSTEM_UI_FLAG_FULLSCREEN or
+                    View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                    View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+            } else View.SYSTEM_UI_FLAG_VISIBLE
+        }
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         updateOrientationUi()
+        updateSystemBars()
         overlay.invalidate()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus && ::focusTapTarget.isInitialized) updateSystemBars()
+    }
+
+    @Deprecated("On older devices, Back restores the player controls")
+    override fun onBackPressed() {
+        if (menusHidden) setMenusHidden(false)
+        else super.onBackPressed()
     }
 
     override fun onDestroy() {
         handler.removeCallbacks(ticker)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            focusBackCallback?.let(onBackInvokedDispatcher::unregisterOnBackInvokedCallback)
+            focusBackCallback = null
+        }
         if (::playerView.isInitialized) playerView.player = null
         if (::player.isInitialized) player.release()
         super.onDestroy()

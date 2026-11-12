@@ -14,4 +14,12 @@
         android:id="@+id/note_overlay"
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
+    <!-- Only present in focus mode. An invisible full-surface tap restores menus
+         without drawing anything above the video or the timed notes. -->
+    <View
+        android:id="@+id/focus_tap_target"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:contentDescription="Chạm để hiện lại các menu"
+        android:visibility="gone" />
 </FrameLayout>
